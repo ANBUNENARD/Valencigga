@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper Functions
+    function isSignedIn() { return request.auth != null; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    function isAdmin() { 
+      return isSignedIn() && (
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+             request.auth.token.email == 'ljcayco@gmail.com'
+      );
+    }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    
+    // Schema Validations
+    function isValidProduct(data) {
+      return data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.price is number && data.price >= 0 &&
+             data.category is string &&
+             data.images is list && data.images.size() > 0 &&
+             data.stock is number && data.stock >= 0;
+    }
+
+    function isValidOrder(data) {
+      return data.userId == request.auth.uid &&
+             data.items is list &&
+             data.totalAmount is number &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered', 'cancelled'] &&
+             data.createdAt == request.time;
+    }
+
+    // Collection Rules
+
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && 
+                      incoming().keys().hasAll(['email', 'createdAt']) &&
+                      incoming().isAdmin == false;
+      allow update: if isOwner(userId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL']);
+    }
+
+    match /products/{productId} {
+      allow list, get: if true;
+      allow write: if isAdmin() && isValidProduct(incoming());
+      
+      match /reviews/{reviewId} {
+        allow read: if true;
+        allow create: if isSignedIn() && 
+                        incoming().userId == request.auth.uid &&
+                        incoming().productId == productId &&
+                        incoming().rating >= 1 && incoming().rating <= 5 &&
+                        incoming().createdAt == request.time;
+        allow delete: if isAdmin() || isOwner(existing().userId);
+      }
+    }
+
+    match /orders/{orderId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid || isAdmin();
+      allow get: if isOwner(resource.data.userId) || isAdmin();
+      allow create: if isSignedIn() && isValidOrder(incoming());
+      allow update: if isAdmin(); // Only admins update order status
+    }
+  }
+}
